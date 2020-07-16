@@ -1,6 +1,8 @@
 ####################################################
 # Supporting R script for: Metelmann et al. 2020,  #
-# PAPER TITLE GOES HERE                            #
+# Impact of climatic, demographic and disease      #
+# control factors on the transmission dynamics of  #
+# COVID-19 in large cities worldwide               #
 #                                                  #
 # Compiled by S. Metelmann, K. Pattni, L. Brierley #
 #          University of Liverpool, 2020           #
@@ -20,6 +22,7 @@ library(ggeffects)
 library(lme4)
 library(lmerTest)
 library(MASS)
+library(mediate)
 library(missForest)
 library(ggpubr)
 library(MuMIn)
@@ -111,6 +114,25 @@ calc.relimp.mm <- function(model, rela, type = "lmg") {
 # Read in data, selecting relevant rows
 all <- read.csv("Metelmann_et_al_covariates.csv", header = T, sep = ",", stringsAsFactors = FALSE, na.strings = c("NA"))
 
+# Set filter to exclude cities with unreliable fits (R0 = NA)
+all <- all %>% filter(!is.na(!!sym(outcome)))
+
+# Append regression weights and set filter to exclude cities with fits not describing R0 (starting from > 100 cumulative cases)
+weights <- read.csv("Metelmann_et_al_fits.csv") %>% mutate(
+  City = gsub("\\.JX", " (JX)", City),
+  City = gsub("\\.FJ", " (FJ)", City),
+  City = gsub("\\.AN", " (AN)", City),
+  City = gsub("\\.JS", " (JS)", City),
+  City = gsub("\\.ZJ", " (ZJ)", City),
+  City = gsub("Daejon", "Daejeon", City)
+)
+
+all <- all %>%
+  left_join(weights %>%
+    select(City, dwi, step), by = "City") %>%
+  filter(!is.na(dwi)) %>%
+  filter(step <= 100)
+
 if (analysis == 1) {
   suffix <- "_all"
 } else if (analysis == 2) {
@@ -134,9 +156,9 @@ all <- all %>%
     log10IHRcapacity = log10(IHRcapacity),
     log10Life_expect = log10(Life_expect),
     log10GDP_city = log10(GDP_city),
-	Elevation = ifelse(Elevation > 0, Elevation, 1), 
-    log10Elevation = log10(Elevation + 1)
-  ) # Add 1 before log-transforming for elevation
+    Elevation = ifelse(Elevation > 0, Elevation, 1),
+    log10Elevation = log10(Elevation)
+  )
 
 # Remove columns no longer needed
 all <- subset(all, select = -c(GDP_country, Elder_country, Airqual_country, Population, Density, IHRcapacity, Life_expect, GDP_city, Elevation))
@@ -159,6 +181,7 @@ if (analysis != 3) {
 
 # Select variables to exclude
 var_for_corr <- within(all, rm("R0", "City", "Country", "DayS", "DayE", "Longitude"))
+var_for_corr <- var_for_corr %>% select(Temperature:Latitude, log10Elevation, DayS, log10Population, log10Density, retail_and_recreation_lag2:residential_lag2, log10GDP_city, Airqual_city, Elder_city, log10IHRcapacity, log10Life_expect, CRD_prev:MeanTestRate) # Arrange order
 
 if (analysis == 3) {
   # Remove constants (country-level data) or NAs
@@ -179,34 +202,39 @@ dev.off()
 ###############################
 
 # Set model variables
-if (analysis != 3) {
-  vars <- c("log10Population", "log10Density", "Temperature", "RH", "Daylight", "Latitude", "log10Elevation", "log10GDP_city", "Elder_city", "log10IHRcapacity", "retail_and_recreation_lag2", "MeanStringencyIndex_lag2")
+if (analysis == 1) {
+  vars <- c("Temperature", "RH", "Daylight", "log10Elevation", "log10Population", "log10Density", "log10GDP_city", "Airqual_city", "Elder_city", "MeanStringencyIndex_lag2")
+} else if (analysis == 2) {
+  vars <- c("Temperature", "RH", "Daylight", "log10Elevation", "log10Population", "log10Density", "log10GDP_city", "Airqual_city", "Elder_city", "MeanStringencyIndex_lag2")
 } else if (analysis == 3) {
-  vars <- c("log10Population", "log10Density", "Temperature", "RH", "Daylight", "log10Elevation", "MeanStringencyIndex_lag2")
+  vars <- c("Temperature", "RH", "log10Elevation", "log10Population", "log10Density", "log10Elevation", "MeanStringencyIndex_lag2")
 }
 
 # Filter/select final model data
 model_data <- all %>%
   mutate(R0 = !!sym(outcome)) %>%
   filter_at(vars(vars, R0), all_vars(complete.cases(.))) %>% # Filter to complete cases in model variables
-  select(all_of(vars), R0, City, Country)
+  select(all_of(vars), R0, City, Country, dwi)
 
-if (analysis == 2) {
-  model_data <- model_data %>% filter(!(Country == "China"))
+if (analysis == 1) {
+  model_data <- model_data %>% filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
+} else if (analysis == 2) {
+  model_data <- model_data %>% filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
 } else if (analysis == 3) {
-  model_data <- model_data %>% filter(Country == "China")
+  model_data <- model_data %>% filter(!(City %in% c("Zhongshan")))
 }
 
 # Construct model formula
 model_formula <- as.formula(paste0("R0 ~ ", paste(vars, collapse = "+")))
 
 # Saturated linear regression model
-model <- lm(formula = model_formula, model_data)
+model <- lm(formula = model_formula, model_data, weights = dwi)
 
 # Plot model fit
 png(paste0("lm", suffix, ".png"))
 pl <- ggplot(model_data, aes(x = fitted(model), y = R0, colour = Country)) +
-  geom_point() +
+  geom_point(aes(size = dwi / max(dwi))) +
+  scale_size_continuous(range = c(0.5, 4), name = "relative weight") +
   geom_abline(intercept = 0, slope = 1) +
   scale_x_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
   scale_y_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
@@ -231,7 +259,8 @@ step$anova
 # Plot model fit
 png(paste0("lm_aic", suffix, ".png"))
 pl <- ggplot(model_data, aes(x = predict(step, model_data), y = R0, colour = Country)) +
-  geom_point() +
+  geom_point(aes(size = dwi / max(dwi))) +
+  scale_size_continuous(range = c(0.5, 4), name = "relative weight") +
   geom_abline(intercept = 0, slope = 1) +
   scale_x_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
   scale_y_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
@@ -251,7 +280,7 @@ vif(step)
 # Model selection step 2: try introducing country-level random effects in a mixed-effects model (only if modelling >1 country)
 
 if (analysis != 3) {
-  mixed_mod_step <- lmer(formula = update(formula(step), ~ . + (1 | Country)), data = model_data, na.action = na.omit, REML = FALSE)
+  mixed_mod_step <- lmer(formula = update(formula(step), ~ . + (1 | Country)), data = model_data, weights = dwi, na.action = na.omit, REML = FALSE)
 
   # Likelihood ratio test whether random effects improve model fit
   print(anova(mixed_mod_step, step))
@@ -259,8 +288,21 @@ if (analysis != 3) {
   # Only bother examining the model if it successfully converged
   if (!(isSingular(mixed_mod_step))) {
 
-    # Refit with REML
-    mixed_mod_step_reml <- lmer(formula = update(formula(step), ~ . + (1 | Country)), data = model_data, na.action = na.omit, REML = TRUE)
+    # Examine another round of stepwise reduction based on AIC semi-manually
+    print(AIC(mixed_mod_step))
+
+    for (i in 1:length(attr(terms(mixed_mod_step), "term.labels"))) {
+      temp_aic <- lmer(formula = update(formula(mixed_mod_step), paste("~ . -", attr(terms(mixed_mod_step), "term.labels")[i])), data = model_data, weights = dwi, na.action = na.omit, REML = FALSE) %>% AIC()
+      print(paste0(attr(terms(mixed_mod_step), "term.labels")[i], ": ", round(temp_aic, 3)))
+    }
+
+    # Adjust and refit REML based on stepwise reduction above
+
+    if (analysis == 1) {
+      mixed_mod_step_reml <- lmer(formula = update(formula(step), ~ . + (1 | Country) - Airqual_city - log10GDP_city), data = model_data, weights = dwi, na.action = na.omit, REML = TRUE)
+    } else if (analysis == 2) {
+      mixed_mod_step_reml <- lmer(formula = update(formula(step), ~ . + (1 | Country) - log10GDP_city), data = model_data, weights = dwi, na.action = na.omit, REML = TRUE)
+    }
 
     # Calculate intraclass coefficient
     ranvcov_step <- mixed_mod_step_reml %>%
@@ -273,7 +315,8 @@ if (analysis != 3) {
     # Plot model fit
     png(paste0("mem", suffix, ".png"))
     pl <- ggplot(model_data, aes(x = predict(mixed_mod_step_reml, model_data, allow.new.levels = TRUE), y = R0, colour = Country)) +
-      geom_point() +
+      geom_point(aes(size = dwi / max(dwi))) +
+      scale_size_continuous(range = c(0.5, 4), name = "relative weight") +
       geom_abline(intercept = 0, slope = 1) +
       scale_x_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
       scale_y_continuous(limits = c(0, ceiling(max(model_data$R0))), expand = c(0, 0)) +
@@ -322,13 +365,14 @@ for (i in 1:length(selected_vars)) {
     geom_ribbon(aes(x = x, ymin = predicted - std.error, ymax = predicted + std.error),
       fill = "lightgrey", alpha = 0.5
     ) +
-    geom_point(data = model_data, aes(x = eval(parse(text = selected_vars[i])), y = R0, colour = Country)) +
+    geom_point(data = model_data, aes(size = dwi / max(dwi), x = eval(parse(text = selected_vars[i])), y = R0, colour = Country)) +
+    scale_size_continuous(range = c(0.5, 4), name = "relative weight") +
     xlab(selected_vars[i]) +
     ylab("R0") +
     ggtitle(paste0("Effect plot: ", selected_vars[i])) +
     theme_bw()
 
-  ggsave(fx, file = paste0(i, "_effect", suffix, ".png"), width = 10, height = 6)
+  ggsave(fx, file = paste0("effect", suffix, "_", i, ".png"), width = 10, height = 6)
 
   # Additionally, plot on original scale if variable was log-transformed
   if (grepl("log10", selected_vars[i])) {
@@ -337,13 +381,14 @@ for (i in 1:length(selected_vars)) {
       geom_ribbon(aes(x = 10^x, ymin = predicted - std.error, ymax = predicted + std.error),
         fill = "lightgrey", alpha = 0.5
       ) +
-      geom_point(data = model_data, aes(x = 10^eval(parse(text = selected_vars[i])), y = R0, colour = Country)) +
+      geom_point(data = model_data, aes(size = dwi / max(dwi), x = 10^eval(parse(text = selected_vars[i])), y = R0, colour = Country)) +
+      scale_size_continuous(range = c(0.5, 4), name = "relative weight") +
       xlab(gsub("log10", "", selected_vars[i])) +
       ylab("R0") +
       ggtitle(paste0("Effect plot: ", gsub("log10", "", selected_vars[i]))) +
       theme_bw()
 
-    ggsave(fx, file = paste0(i, "_effect", suffix, "_backtransform.png"), width = 10, height = 6)
+    ggsave(fx, file = paste0("effect", suffix, "_", i, "_backtransform.png"), width = 10, height = 6)
   }
 }
 
@@ -409,7 +454,7 @@ relimp_df %>%
 # Construct model table for selected stepwise-reduced model
 results_select <- data.frame(
   summary(selected_model)$coefficients,
-  confint(selected_model) %>% .[!(rownames(.) %in% c(".sig01", ".sigma")), ]
+  confint(selected_model, method = "Wald") %>% .[!(rownames(.) %in% c(".sig01", ".sigma")), ]
 ) %>%
   rownames_to_column("Covariate") %>%
   left_join(selected_model %>%
@@ -421,7 +466,17 @@ results_select <- data.frame(
   filter(Covariate != "(Intercept)")
 
 if (class(selected_model) != "lmerModLmerTest") {
-  results_select <- results_select %>% mutate(delta_AIC = drop1(selected_model, test = "Chisq")$AIC[1] - AIC) # Add delta AICs only if not a mixed-effect model
+  results_select <- results_select %>% mutate(delta_AIC = drop1(selected_model, test = "Chisq")$AIC[1] - AIC) # Add delta AICs if fixed effect model
+} else {
+  model_non_reml <- col_aic <- lmer(formula = formula(selected_model), data = model_data, weights = dwi, na.action = na.omit, REML = FALSE)
+
+  col_aic <- col_lrt <- rep(NA, length(attr(terms(selected_model), "term.labels")))
+
+  for (i in 1:length(attr(terms(selected_model), "term.labels"))) {
+    col_aic[i] <- AIC(lmer(formula = update(formula(selected_model), paste("~ . -", attr(terms(selected_model), "term.labels")[i])), data = model_data, weights = dwi, na.action = na.omit, REML = FALSE)) - AIC(model_non_reml)
+    col_lrt[i] <- unlist(anova(lmer(formula = update(formula(selected_model), paste("~ . -", attr(terms(selected_model), "term.labels")[i])), data = model_data, weights = dwi, na.action = na.omit, REML = FALSE), model_non_reml)["Pr(>Chisq)"])[2] %>% as.numeric()
+  }
+  results_select <- results_select %>% mutate(delta_AIC = col_aic, p_LRT = col_lrt)
 }
 
 # Clean and write to table
@@ -463,3 +518,26 @@ relimp_select_df %>%
   arrange(-pmvd) %>%
   mutate_if(is.numeric, round, 3) %>%
   write.csv(paste0("relaimp_select_type", suffix, ".csv"))
+
+######################
+# Mediation analysis #
+######################
+
+# Reselect data, including DayS variable
+model_data_med <- all %>%
+  mutate(R0 = !!sym(outcome)) %>%
+  filter_at(vars(Daylight, DayS, Temperature, RH, R0), all_vars(complete.cases(.)))
+
+# Set seed for reproducibility
+set.seed(1528)
+
+# Conduct mediation analysis based on final selected mixed-effects model for global cities excluding China, based on Monte Carlo simulation
+mediation_fit <- mediate(lme4::lmer(formula = DayS ~ Daylight + log10Population + log10Density + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
+  lme4::lmer(formula = R0 ~ Daylight + DayS + log10Population + log10Density + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
+  treat = "Daylight", mediator = "DayS", boot = FALSE, sims = 5000
+)
+
+# Write output table
+sink(paste0("mediation_", analysis, ".txt"))
+summary(mediation_fit)
+sink()
