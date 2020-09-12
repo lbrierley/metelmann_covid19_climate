@@ -45,6 +45,8 @@ if (!require(relaimpo)) {
 analysis <- 2
 # Select named outcome column to use
 outcome <- "R0"
+# Use weights?
+use_weights <- TRUE
 
 ###############################
 # Define additional functions #
@@ -132,6 +134,10 @@ all <- all %>%
     select(City, dwi, step), by = "City") %>%
   filter(!is.na(dwi)) %>%
   filter(step <= 100)
+
+if (use_weights == FALSE) {
+  all <- all %>% mutate(dwi = 1)
+}
 
 if (analysis == 1) {
   suffix <- "_all"
@@ -523,10 +529,25 @@ relimp_select_df %>%
 # Mediation analysis #
 ######################
 
-# Reselect data, including DayS variable
+# Reselect data, as in selected models, including DayS variable
 model_data_med <- all %>%
   mutate(R0 = !!sym(outcome)) %>%
-  filter_at(vars(Daylight, DayS, Temperature, RH, R0), all_vars(complete.cases(.)))
+  filter_at(vars(Daylight, DayS, Temperature, RH, R0), all_vars(complete.cases(.))) %>%
+  filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
+
+# Set seed for reproducibility
+set.seed(1111)
+
+# Conduct mediation analysis based on final selected mixed-effects model for all global cities, based on Monte Carlo simulation
+mediation_fit <- mediation::mediate(lme4::lmer(formula = DayS ~ Daylight + log10Population + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
+  lme4::lmer(formula = R0 ~ Daylight + DayS + log10Population + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
+  treat = "Daylight", mediator = "DayS", boot = FALSE, sims = 5000
+)
+
+# Write output table
+sink(paste0("mediation_", analysis, ".txt"))
+summary(mediation_fit)
+sink()
 
 # Set seed for reproducibility
 set.seed(1528)
