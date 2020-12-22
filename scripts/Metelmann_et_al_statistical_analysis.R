@@ -47,6 +47,8 @@ analysis <- 2
 outcome <- "R0"
 # Use weights?
 use_weights <- TRUE
+# Select dwi threshold to use
+dwi_threshold = 6
 
 ###############################
 # Define additional functions #
@@ -119,22 +121,26 @@ all <- read.csv("Metelmann_et_al_covariates.csv", header = T, sep = ",", strings
 # Set filter to exclude cities with unreliable fits (R0 = NA)
 all <- all %>% filter(!is.na(!!sym(outcome)))
 
-# Append regression weights and set filter to exclude cities with fits not describing R0 (starting from > 100 cumulative cases)
+# Append regression weights
 weights <- read.csv("Metelmann_et_al_fits.csv") %>% mutate(
   City = gsub("\\.JX", " (JX)", City),
   City = gsub("\\.FJ", " (FJ)", City),
   City = gsub("\\.AN", " (AN)", City),
   City = gsub("\\.JS", " (JS)", City),
   City = gsub("\\.ZJ", " (ZJ)", City),
-  City = gsub("Daejon", "Daejeon", City)
+  City = gsub("\\.AH", " (AH)", City),
 )
 
+# Filter cities based on exponential growth model fits
 all <- all %>%
   left_join(weights %>%
     select(City, dwi, step), by = "City") %>%
   filter(!is.na(dwi)) %>%
-  filter(step <= 100)
+  filter(step <= 100) %>% # Filter out cities with fits starting from > 100 cases)
+  filter(dwi < dwi_threshold) %>%
+  filter(!(City %in% c("Yogyakarta","Amsterdam","Des Moines"))) # Filter out cities with fits known a priori to get stuck in local maxima
 
+# If unweighted model, set all weights to be equal
 if (use_weights == FALSE) {
   all <- all %>% mutate(dwi = 1)
 }
@@ -155,8 +161,8 @@ all <- all %>%
     GDP_city = coalesce(as.numeric(GDP_city), GDP_country), # Substitute in country average GDP if no city-level data
     Elder_city = coalesce(Elder_city, Elder_country), # Substitute in country average elder dependency ratio if no city-level data
     Airqual_city = coalesce(Airqual_city, Airqual_country), # Substitute in country average air pollution exposure if no city-level data
-    DayS = as.numeric(as.Date(as.character(all$DayS), format = "%m/%d/%Y") - as.Date("2020-01-01")), # Convert DayS to calendar days
-    DayE = as.numeric(as.Date(as.character(all$DayE), format = "%m/%d/%Y") - as.Date("2020-01-01")), # Convert DayE to calendar days
+    DayS = as.numeric(as.Date(all$DayS) - as.Date("2020-01-01")),   # Convert DayS to calendar days
+    DayE = as.numeric(as.Date(all$DayE) - as.Date("2020-01-01")),   # Convert DayE to calendar days
     log10Population = log10(Population),
     log10Density = log10(Density),
     log10IHRcapacity = log10(IHRcapacity),
@@ -169,16 +175,17 @@ all <- all %>%
 # Remove columns no longer needed
 all <- subset(all, select = -c(GDP_country, Elder_country, Airqual_country, Population, Density, IHRcapacity, Life_expect, GDP_city, Elevation))
 
-# Impute variables (temperature, relative humidity, retail and recreation) based on all other variables
+# Impute variables (temperature, relative humidity, retail and recreation, stringency of gov't response) based on all other variables
 if (analysis != 3) {
   set.seed(1205) # Set seed for reproducibility
   imputed <- all %>%
-    select(log10Population, log10Density, Temperature, RH, Daylight, Latitude, log10Elevation, log10GDP_city, Elder_city, Airqual_city, log10Life_expect, log10IHRcapacity, CRD_prev, MeanStringencyIndex_lag2, retail_and_recreation_lag2) %>%
+    select(log10Population, log10Density, Temperature, RH, UV, DayS, Latitude, log10Elevation, log10GDP_city, Elder_city, Airqual_city, log10Life_expect, log10IHRcapacity, CRD_prev, MeanStringencyIndex_lag2, retail_and_recreation_lag2) %>%
     missForest() %>%
     .$ximp
   all$retail_and_recreation_lag2 <- imputed$retail_and_recreation_lag2
   all$Temperature <- imputed$Temperature
   all$RH <- imputed$RH
+  all$MeanStringencyIndex_lag2 <- imputed$MeanStringencyIndex_lag2
 }
 
 ##################################
@@ -186,8 +193,8 @@ if (analysis != 3) {
 ##################################
 
 # Select variables to exclude
-var_for_corr <- within(all, rm("R0", "City", "Country", "DayS", "DayE", "Longitude"))
-var_for_corr <- var_for_corr %>% select(Temperature:Latitude, log10Elevation, DayS, log10Population, log10Density, retail_and_recreation_lag2:residential_lag2, log10GDP_city, Airqual_city, Elder_city, log10IHRcapacity, log10Life_expect, CRD_prev:MeanTestRate) # Arrange order
+var_for_corr <- within(all, rm("R0", "City", "Country", "DayE", "Longitude"))
+var_for_corr <- var_for_corr %>% select(Temperature:Latitude, log10Elevation, DayS, log10Population, log10Density, retail_and_recreation_lag2:residential_lag2, log10GDP_city, Airqual_city, Elder_city, log10IHRcapacity, log10Life_expect, CRD_prev, MeanStringencyIndex_lag2) # Arrange order
 
 if (analysis == 3) {
   # Remove constants (country-level data) or NAs
@@ -208,12 +215,10 @@ dev.off()
 ###############################
 
 # Set model variables
-if (analysis == 1) {
-  vars <- c("Temperature", "RH", "Daylight", "log10Elevation", "log10Population", "log10Density", "log10GDP_city", "Airqual_city", "Elder_city", "MeanStringencyIndex_lag2")
-} else if (analysis == 2) {
-  vars <- c("Temperature", "RH", "Daylight", "log10Elevation", "log10Population", "log10Density", "log10GDP_city", "Airqual_city", "Elder_city", "MeanStringencyIndex_lag2")
+if (analysis == 1 | analysis == 2) {
+  vars <- c("RH", "UV", "DayS", "Latitude", "log10Elevation", "log10Population", "log10Density", "log10GDP_city", "Airqual_city", "Elder_city", "MeanStringencyIndex_lag2")
 } else if (analysis == 3) {
-  vars <- c("Temperature", "RH", "log10Elevation", "log10Population", "log10Density", "log10Elevation", "MeanStringencyIndex_lag2")
+  vars <- c("Temperature", "RH", "UV", "DayS", "log10Elevation", "log10Population", "log10Density", "MeanStringencyIndex_lag2") 
 }
 
 # Filter/select final model data
@@ -222,12 +227,9 @@ model_data <- all %>%
   filter_at(vars(vars, R0), all_vars(complete.cases(.))) %>% # Filter to complete cases in model variables
   select(all_of(vars), R0, City, Country, dwi)
 
-if (analysis == 1) {
-  model_data <- model_data %>% filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
-} else if (analysis == 2) {
-  model_data <- model_data %>% filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
-} else if (analysis == 3) {
-  model_data <- model_data %>% filter(!(City %in% c("Zhongshan")))
+# Exclude overly influential data points
+if (analysis == 3) {
+  model_data <- model_data %>% filter(!(City %in% c("Xinyang","Yichun")))
 }
 
 # Construct model formula
@@ -434,7 +436,7 @@ relimp_df <- bind_cols(
   rel_pmvd = calc.relimp.mm(model, rela = TRUE, type = c("pmvd"))$pmvd
 ) %>%
   mutate(type = case_when(
-    grepl("Temperature|RH|Daylight", covar) ~ "climate",
+    grepl("Temperature|RH|UV", covar) ~ "climate",
     grepl("retail_and_recreation|MeanStringencyIndex", covar) ~ "response",
     grepl("Population|Density|Elder_city|Life_expect", covar) ~ "demographic",
     grepl("Elevation|Latitude", covar) ~ "geography",
@@ -503,7 +505,7 @@ relimp_select_df <- bind_cols(
   rel_pmvd = calc.relimp.mm(selected_model, rela = TRUE, type = c("pmvd"))$pmvd
 ) %>%
   mutate(type = case_when(
-    grepl("Temperature|RH|Daylight", covar) ~ "climate",
+    grepl("Temperature|RH|UV", covar) ~ "climate",
     grepl("retail_and_recreation|MeanStringencyIndex", covar) ~ "response",
     grepl("Population|Density|Elder_city|Life_expect", covar) ~ "demographic",
     grepl("Elevation|Latitude", covar) ~ "geography",
@@ -524,41 +526,3 @@ relimp_select_df %>%
   arrange(-pmvd) %>%
   mutate_if(is.numeric, round, 3) %>%
   write.csv(paste0("relaimp_select_type", suffix, ".csv"))
-
-######################
-# Mediation analysis #
-######################
-
-# Reselect data, as in selected models, including DayS variable
-model_data_med <- all %>%
-  mutate(R0 = !!sym(outcome)) %>%
-  filter_at(vars(Daylight, DayS, Temperature, RH, R0), all_vars(complete.cases(.))) %>%
-  filter(!(City %in% c("Mexico City", "Guadalajara", "Udaipur")))
-
-# Set seed for reproducibility
-set.seed(1111)
-
-# Conduct mediation analysis based on final selected mixed-effects model for all global cities, based on Monte Carlo simulation
-mediation_fit <- mediation::mediate(lme4::lmer(formula = DayS ~ Daylight + log10Population + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
-  lme4::lmer(formula = R0 ~ Daylight + DayS + log10Population + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
-  treat = "Daylight", mediator = "DayS", boot = FALSE, sims = 5000
-)
-
-# Write output table
-sink(paste0("mediation_", analysis, ".txt"))
-summary(mediation_fit)
-sink()
-
-# Set seed for reproducibility
-set.seed(1528)
-
-# Conduct mediation analysis based on final selected mixed-effects model for global cities excluding China, based on Monte Carlo simulation
-mediation_fit <- mediate(lme4::lmer(formula = DayS ~ Daylight + log10Population + log10Density + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
-  lme4::lmer(formula = R0 ~ Daylight + DayS + log10Population + log10Density + MeanStringencyIndex_lag2 + (1 | Country), data = model_data_med, weights = dwi, na.action = na.omit, REML = TRUE),
-  treat = "Daylight", mediator = "DayS", boot = FALSE, sims = 5000
-)
-
-# Write output table
-sink(paste0("mediation_", analysis, ".txt"))
-summary(mediation_fit)
-sink()

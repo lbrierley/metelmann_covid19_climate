@@ -11,4 +11,4 @@ Folder `data`:
 
 Folder `scripts`:
 
-* `Metelmann_et_al_statistical_analysis.r`: Script to conduct statistical regression analysis including statistical validation, mediation analysis
+* `Metelmann_et_al_statistical_analysis.r`: Script to conduct statistical regression analysis including statistical validation
