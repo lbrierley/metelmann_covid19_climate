@@ -1,4 +1,4 @@
-# Data & code for Metelmann, Pattni, Brierley et al. 2020
+# Data & code for [Metelmann, Pattni, Brierley et al. 2020](https://www.sciencedirect.com/science/article/pii/S2352771421000112)
 
 ## Data
 
